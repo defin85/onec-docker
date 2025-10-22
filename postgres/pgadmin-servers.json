@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "1C Database (PostgreSQL 16)",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "postgres",
+      "Username": "postgres",
+      "SSLMode": "prefer",
+      "Comment": "Локальная база данных PostgreSQL для 1С:Предприятие"
+    }
+  }
+}

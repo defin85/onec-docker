@@ -1,0 +1,145 @@
+# Dockerfile для PostgreSQL от 1С с поддержкой 1С:Предприятие
+# Использует официальные дистрибутивы от 1С с releases.1c.ru
+# Включает расширения mchar, fulleq, fasttrun
+
+# ============================================
+# Стадия 1: Скачивание дистрибутива
+# ============================================
+ARG DOCKER_REGISTRY_URL
+ARG BASE_IMAGE=onec-client
+ARG BASE_TAG=latest
+
+FROM ${DOCKER_REGISTRY_URL}/${BASE_IMAGE}:${BASE_TAG} AS downloader
+
+# Версия PostgreSQL от 1С (например: 17.5-11.1C)
+ARG POSTGRES_VERSION
+ARG ONEC_USERNAME
+ARG ONEC_PASSWORD
+
+# Копирование скриптов и локальных дистрибутивов
+COPY ./scripts/download_postgres.sh /download_postgres.sh
+COPY ./distr /distr
+RUN chmod +x /download_postgres.sh
+
+WORKDIR /tmp
+
+# Установка необходимых пакетов для скачивания
+RUN apt-get update \
+  && apt-get install -y \
+          locales \
+          ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && locale-gen ru_RU.UTF-8
+
+ENV LANG ru_RU.UTF-8
+ENV LANGUAGE ru_RU:ru
+ENV LC_ALL ru_RU.UTF-8
+
+# Скачивание или копирование дистрибутива PostgreSQL
+RUN /download_postgres.sh "$ONEC_USERNAME" "$ONEC_PASSWORD" "$POSTGRES_VERSION"
+
+# ============================================
+# Стадия 2: Установка PostgreSQL
+# ============================================
+FROM debian:bookworm-slim AS installer
+
+ARG POSTGRES_VERSION
+
+# Копирование скрипта установки и дистрибутивов
+COPY ./scripts/install_postgres.sh /install_postgres.sh
+COPY --from=downloader /tmp/downloads /tmp/downloads
+RUN chmod +x /install_postgres.sh
+
+# Установка зависимостей
+RUN apt-get update \
+  && apt-get install -y \
+          locales \
+          ca-certificates \
+          gnupg \
+          lsb-release \
+  && rm -rf /var/lib/apt/lists/* \
+  && locale-gen ru_RU.UTF-8
+
+ENV LANG ru_RU.UTF-8
+ENV LC_ALL ru_RU.UTF-8
+
+# Установка PostgreSQL от 1С
+WORKDIR /tmp/downloads/AddCompPostgre/${POSTGRES_VERSION}
+RUN /install_postgres.sh "$POSTGRES_VERSION"
+
+# Определение версии PostgreSQL для дальнейшего использования
+RUN PG_MAJOR=$(ls -d /usr/lib/postgresql/*/ | head -1 | xargs basename) \
+  && echo "PG_MAJOR=$PG_MAJOR" > /etc/pg_version.env
+
+# ============================================
+# Стадия 3: Финальный образ
+# ============================================
+FROM debian:bookworm-slim
+
+LABEL maintainer="onec-docker project"
+LABEL description="PostgreSQL from 1C with extensions for 1C:Enterprise (mchar, fulleq, fasttrun)"
+
+# Переменные окружения
+ENV PGDATA=/var/lib/postgresql/data
+ENV LANG=ru_RU.UTF-8
+ENV LC_ALL=ru_RU.UTF-8
+
+# Копирование установленного PostgreSQL
+COPY --from=installer /usr/lib/postgresql /usr/lib/postgresql
+COPY --from=installer /usr/share/postgresql /usr/share/postgresql
+COPY --from=installer /usr/bin/pg_* /usr/bin/
+COPY --from=installer /usr/bin/psql /usr/bin/
+COPY --from=installer /etc/pg_version.env /etc/pg_version.env
+
+# Получение версии PostgreSQL
+RUN . /etc/pg_version.env \
+  && echo "PostgreSQL version: $PG_MAJOR" \
+  && echo "export PG_MAJOR=$PG_MAJOR" >> /etc/profile \
+  && echo "export PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH" >> /etc/profile
+
+# Установка runtime зависимостей
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+          locales \
+          gosu \
+          ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && localedef -i ru_RU -c -f UTF-8 -A /usr/share/locale/locale.alias ru_RU.UTF-8
+
+# Создание пользователя postgres
+RUN groupadd -r postgres --gid=999 \
+  && useradd -r -g postgres --uid=999 --home-dir=/var/lib/postgresql --shell=/bin/bash postgres \
+  && mkdir -p /var/lib/postgresql \
+  && chown -R postgres:postgres /var/lib/postgresql
+
+# Создание необходимых директорий
+RUN . /etc/pg_version.env \
+  && mkdir -p "$PGDATA" \
+  && chown -R postgres:postgres "$PGDATA" \
+  && chmod 700 "$PGDATA" \
+  && mkdir -p /var/run/postgresql \
+  && chown -R postgres:postgres /var/run/postgresql \
+  && chmod 775 /var/run/postgresql \
+  && mkdir -p /docker-entrypoint-initdb.d
+
+# Установка PATH для PostgreSQL
+RUN . /etc/pg_version.env \
+  && echo "export PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH" >> /etc/bash.bashrc
+
+# Копирование entrypoint скрипта
+COPY ./postgres/docker-entrypoint-1c.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+  && ln -s /usr/local/bin/docker-entrypoint.sh /
+
+# Expose порта
+EXPOSE 5432
+
+# Volume для данных
+VOLUME /var/lib/postgresql/data
+
+# Переключение на пользователя postgres
+USER postgres
+
+# Entrypoint и команда запуска
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["postgres"]
